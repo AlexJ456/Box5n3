@@ -1,93 +1,169 @@
-const CACHE_NAME = 'box-breathing-cache-v2'; // Versioned cache name
-const urlsToCache = [
+const CACHE_NAME = 'box-breathing-v3';
+const STATIC_ASSETS = [
   './',
   './index.html',
-  './app.js',           // Replace with your app’s JS file
-  './manifest.json',    // Replace with your manifest file
-  './icons/icon-192x192.png', // Adjust icon paths as needed
+  './app.js',
+  './manifest.json',
+  './icons/icon-192x192.png',
   './icons/icon-512x512.png'
 ];
 
-// Install event - cache assets
-self.addEventListener('install', event => {
+// Install: cache static assets
+self.addEventListener('install', (event) => {
   event.waitUntil(
     caches.open(CACHE_NAME)
-      .then(cache => {
-        console.log('Opened cache:', CACHE_NAME);
-        return cache.addAll(urlsToCache);
+      .then((cache) => {
+        console.log('[SW] Caching static assets');
+        return cache.addAll(STATIC_ASSETS);
       })
-      .catch(error => {
-        console.error('Cache addAll failed:', error);
+      .then(() => {
+        console.log('[SW] Static assets cached');
+        return self.skipWaiting();
+      })
+      .catch((error) => {
+        console.error('[SW] Cache failed:', error);
       })
   );
-  // Activate immediately
-  self.skipWaiting();
 });
 
-// Activate event - clean up old caches
-self.addEventListener('activate', event => {
-  const cacheWhitelist = [CACHE_NAME];
+// Activate: clean up old caches
+self.addEventListener('activate', (event) => {
   event.waitUntil(
-    caches.keys().then(cacheNames => {
-      return Promise.all(
-        cacheNames.map(cacheName => {
-          if (cacheWhitelist.indexOf(cacheName) === -1) {
-            console.log('Deleting old cache:', cacheName);
-            return caches.delete(cacheName);
-          }
-        })
-      );
-    }).then(() => {
-      // Take control of clients immediately
-      return self.clients.claim();
-    })
+    caches.keys()
+      .then((cacheNames) => {
+        return Promise.all(
+          cacheNames
+            .filter((name) => name !== CACHE_NAME)
+            .map((name) => {
+              console.log('[SW] Deleting old cache:', name);
+              return caches.delete(name);
+            })
+        );
+      })
+      .then(() => {
+        console.log('[SW] Activated');
+        return self.clients.claim();
+      })
   );
 });
 
-// Fetch event - serve from cache or network
-self.addEventListener('fetch', event => {
-  event.respondWith(
-    caches.match(event.request)
-      .then(response => {
-        if (response) {
-          console.log('Serving from cache:', event.request.url);
+// Fetch: cache-first strategy for static assets, network-first for others
+self.addEventListener('fetch', (event) => {
+  const { request } = event;
+  const url = new URL(request.url);
+
+  // Only handle same-origin requests
+  if (url.origin !== location.origin) {
+    return;
+  }
+
+  // For navigation requests, try network first
+  if (request.mode === 'navigate') {
+    event.respondWith(
+      fetch(request)
+        .then((response) => {
+          // Cache the latest version
+          const responseClone = response.clone();
+          caches.open(CACHE_NAME).then((cache) => {
+            cache.put(request, responseClone);
+          });
           return response;
+        })
+        .catch(() => {
+          // Fall back to cache
+          return caches.match(request).then((cached) => {
+            return cached || caches.match('./index.html');
+          });
+        })
+    );
+    return;
+  }
+
+  // For other requests, use cache-first
+  event.respondWith(
+    caches.match(request)
+      .then((cached) => {
+        if (cached) {
+          // Return cached version and update in background
+          event.waitUntil(
+            fetch(request)
+              .then((response) => {
+                if (response && response.status === 200) {
+                  caches.open(CACHE_NAME).then((cache) => {
+                    cache.put(request, response);
+                  });
+                }
+              })
+              .catch(() => {})
+          );
+          return cached;
         }
 
-        // Clone the request for fetching
-        const fetchRequest = event.request.clone();
-
-        return fetch(fetchRequest)
-          .then(response => {
-            // Validate response
+        // Not in cache, fetch from network
+        return fetch(request)
+          .then((response) => {
             if (!response || response.status !== 200 || response.type !== 'basic') {
               return response;
             }
 
-            // Clone and cache the response
-            const responseToCache = response.clone();
-            caches.open(CACHE_NAME)
-              .then(cache => {
-                console.log('Caching new resource:', event.request.url);
-                cache.put(event.request, responseToCache);
-              });
+            const responseClone = response.clone();
+            caches.open(CACHE_NAME).then((cache) => {
+              cache.put(request, responseClone);
+            });
 
             return response;
           })
-          .catch(() => {
-            console.log('Fetch failed, serving fallback:', event.request.url);
-            // Fallback to index.html for navigation requests
-            if (event.request.mode === 'navigate') {
-              return caches.match('./index.html');
+          .catch((error) => {
+            console.error('[SW] Fetch failed:', error);
+            // Return a fallback for specific file types if needed
+            if (request.destination === 'image') {
+              return new Response('', { status: 404 });
             }
+            throw error;
           });
       })
   );
 });
 
-// Handle skip waiting messages
-self.addEventListener('message', event => {
-  if (event.data && event.data.type === 'SKIP_WAITING') {
+// Handle messages from clients
+self.addEventListener('message', (event) => {
+  if (event.data?.type === 'SKIP_WAITING') {
     self.skipWaiting();
   }
+  
+  if (event.data?.type === 'GET_VERSION') {
+    event.ports[0].postMessage({ version: CACHE_NAME });
+  }
+});
+
+// Background sync for stats (if needed in future)
+self.addEventListener('sync', (event) => {
+  if (event.tag === 'sync-stats') {
+    console.log('[SW] Syncing stats...');
+  }
+});
+
+// Push notifications (for future use)
+self.addEventListener('push', (event) => {
+  if (event.data) {
+    const data = event.data.json();
+    const options = {
+      body: data.body || 'Time for a breathing exercise!',
+      icon: './icons/icon-192x192.png',
+      badge: './icons/icon-96x96.png',
+      vibrate: [100, 50, 100],
+      data: { url: './' }
+    };
+    
+    event.waitUntil(
+      self.registration.showNotification(data.title || 'Box Breathing', options)
+    );
+  }
+});
+
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  event.waitUntil(
+    clients.openWindow(event.notification.data?.url || './')
+  );
 });
